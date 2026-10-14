@@ -19,8 +19,13 @@ it lives alongside it in OneDrive and must be obtained separately.
 | | tracked |
 |---|---|
 | `01_Image_Conversion/`, `04_Extinction_coefficient/`, `05_Capillary_Segmentation/` | yes |
+| `06_Remote_Phone_Control/` | yes — kept for reference, **superseded**, see Capture |
 | `BackgroundSubtract.py`, `README.md` | yes |
 | `00_Images/` and every other folder below | **no** — add a `.gitignore` before `git add -A` |
+
+`03_Optical_Density_Calculation/`, where the current pipeline lives, is **not yet
+tracked**. A stray `.DS_Store` is already committed under
+`06_Remote_Phone_Control/`; a `.gitignore` would have caught it.
 
 ## Layout
 
