@@ -1,219 +1,173 @@
-# Smartphone Nailfold Capillaroscope Project
+# Smartphone Nailfold Capillaroscope
 
-This repository contains image data, conversion tools, analysis notebooks, and
-phone-control scripts for a smartphone-based nailfold capillaroscope workflow.
-It is organized as a Durr Lab master's project workflow, starting with raw
-smartphone images and ending with optical density, capillary segmentation, and
-flow/velocity analysis.
+A smartphone-based nailfold capillaroscope: raw DNG capture through to
+haemoglobin concentration, capillary segmentation, and flow analysis.
+Durr Lab master's project.
 
-## Repository Layout
+> **Status.** The optical-density pipeline runs end to end and is magnification-
+> calibrated, but measured `[Hb]` currently reads **~55% below venous ground
+> truth** and that discrepancy is unexplained. See
+> [`03_Optical_Density_Calculation/DECISIONS.md`](03_Optical_Density_Calculation/DECISIONS.md)
+> before quoting any absolute number from this repository.
+
+## What is tracked in git
+
+Only a subset of the working tree is under version control. Image data is far
+too large (`00_Images/` alone is ~36 GB) and is **not** in the repository —
+it lives alongside it in OneDrive and must be obtained separately.
+
+| | tracked |
+|---|---|
+| `01_Image_Conversion/`, `04_Extinction_coefficient/`, `05_Capillary_Segmentation/` | yes |
+| `BackgroundSubtract.py`, `README.md` | yes |
+| `00_Images/` and every other folder below | **no** — add a `.gitignore` before `git add -A` |
+
+## Layout
 
 ```text
 smartphone_capillaroscope/
-|-- 00_Images/
-|-- 01_Image_Conversion/
-|-- 02_Image_Quality_Assessment/
-|-- 03_Optical_Density_Calculation/
-|-- 04_Extinction_coefficient/
-|-- 05_Capillary_Segmentation/
-|-- 06_Remote_Phone_Control/
+|-- 00_Images/                      raw + processed image data (NOT in git, ~36 GB)
+|-- 01_Image_Conversion/            DNG -> linear TIFF/npz
+|-- 02_Image_Quality_Assessment/    focus ranking, MTF, magnification
+|-- 03_Optical_Density_Calculation/ OD and [Hb]  <- the main pipeline
+|-- 04_Extinction_coefficient/      LED-weighted extinction coefficients
+|-- 05_Capillary_Segmentation/      vessel masks, straightening, kymographs
+|-- 06_Remote_Phone_Control/        adb capture scripts (SUPERSEDED, see below)
+|-- 07_Nature_Comm_Samples/         reference figures
+|-- 07_PCB_Design/                  illumination board
+|-- 08_Full_Workflow/
+|-- 09_Samsung_Deliverables/
+|-- 10_IRB_CES/
+|-- 12_Mobile NFC Captured Data/
+|-- 13_mCap_Analysis/
+|-- 14_Phantom_fabrication/
 |-- BackgroundSubtract.py
-|-- convert_to_ipynb.py
 `-- README.md
 ```
 
-## Folder Contents
+## Capture
 
-### `00_Images/`
+**Focal stacks are captured natively through Camera2 in the Android app**
+(`FocalStackCapture`), driving `LENS_FOCUS_DISTANCE` directly.
 
-Raw and processed smartphone capillaroscope image data. The folder includes:
+The scripts in `06_Remote_Phone_Control/` (`control_tap.py`, `control_drag.py`,
+`burst_raw.sh`, `focus_sweep.py`) drive Samsung Expert RAW's UI over
+`adb shell input tap`. **That approach is superseded and should not be
+revived.** An Android app cannot inject touches into another app, so it can
+never move inside the app; and Expert RAW applies processing that
+`FocalStackCapture` deliberately disables (noise reduction, hot-pixel, shading,
+edge, tonemap), while routing frames through the gallery loses the
+`CaptureResult` metadata the analysis reads black level, white level and CFA
+pattern from. Both break the intensity linearity optical density depends on.
 
-- `1x nailfold/`: nailfold image sets collected at 1x magnification, including
-  DNG, JPG, RAW, TIFF, and PNG-derived outputs.
-- `1x resolution target/`: resolution-target acquisitions for image quality and
-  MTF analysis.
-- `3.3x/`: higher-magnification image sets organized by acquisition date and
-  focus/exposure setting folders.
+The folder is kept for reference only.
 
-Common file types in this folder include `.dng`, `.raw`, `.jpg`, `.tif`,
-`.tiff`, `.png`, `.mov`, `.mp4`, `.csv`, `.json`, `.txt`, and `.zip`.
-Several acquisition folders also contain `focus_pipeline_out/` results with:
+## The optical-density pipeline
 
-- `focus_ranking.csv`
-- `pipeline_params.txt`
-- `calibration.json`
+`03_Optical_Density_Calculation/` is where the current work lives. Two
+documents there are authoritative and kept up to date:
+
+- **[`PIPELINE.md`](03_Optical_Density_Calculation/PIPELINE.md)** — the flowchart,
+  the measurement, step-by-step protocol, constants, QC checks, known gaps.
+- **[`DECISIONS.md`](03_Optical_Density_Calculation/DECISIONS.md)** — why each
+  choice was made, with the evidence and what would overturn it. Read this
+  before changing a setting.
+
+### Code
+
+| file | what |
+|---|---|
+| `demo_mac.ipynb` | the notebook you run: load image, pick ROIs, inspect results |
+| `capillary.py` | all 74 pipeline functions; settings via `configure()` |
+| `flat_field.py` | flat construction, focus matching, exposure detection |
+| `magnification.py` | NBS-chart calibration (period fitting, deskew) |
+| `diameter_response.py` | OD-vs-diameter checks and spread analysis |
+| `consistency_analysis.ipynb` | variance components, ICC, repeatability |
+| `magnification_calibration.ipynb` | builds `results/magnification_curve.csv` |
+
+Settings live in `capillary.py` and are changed with `configure()`, never by
+assignment — most functions read them as module globals, so assigning in the
+notebook would change the notebook's copy and leave the module's untouched:
+
+```python
+import capillary as cap
+cap.configure(PIX_UM=0.8123, SO2=0.90)
+cap.settings()
+```
+
+### The measurement
+
+```
+[Hb] (g/dL) = 64500 x OD / (D_cm x eps x 10)
+
+OD  = -log10(I_capillary / I_background)    at each centerline point
+D   = that point's own diameter             (mask ray-cast)
+eps = SO2 x 33376 + (1 - SO2) x 35754       LED-weighted, 525 nm
+```
+
+Applied **per point** along the capillary, not once per vessel, because the
+diameter varies along its length. Median over points within an ROI.
+
+### Calibration
+
+- **Magnification is 2.96x, not the nominal 3.3x.** Calibrated from an NBS
+  1963A chart across 15 focus positions; `PIX_UM` is looked up per image from
+  `results/magnification_curve.csv`. The nominal value was 12.7% high, so every
+  `[Hb]` computed before this was ~11% too high.
+- **Flat-field correction is implemented but OFF** (`APPLY_FLAT`). A paired test
+  on 20 ROIs found no measurable benefit; see `DECISIONS.md`.
+- **Dark subtraction is not applied** — measured dark is ~0.2% of signal.
+- Exposure is read automatically from each image's metadata sidecar. Flats
+  exist for 1/45, 1/50 and 1/60 only; images at 1/20 and 1/30 cannot be
+  flat-corrected and the notebook disables the correction for them.
+
+## Other folders
 
 ### `01_Image_Conversion/`
-
-Tools for converting smartphone raw image formats into TIFF images for later
-analysis.
-
-- `convert_image.py`: converts `.dng` files in a selected folder to 16-bit TIFF
-  using `rawpy` and `tifffile`.
-- `convert_image.ipynb`: notebook version of the DNG conversion workflow.
-- `extract_raw_subifd.m`: MATLAB helper for reading a raw DNG SubIFD and saving
-  an uncompressed 16-bit TIFF.
-
-Typical Python conversion:
-
-```bash
-python 01_Image_Conversion/convert_image.py
-```
-
-The script prompts for the folder containing `.dng` files and writes `.tif`
-files next to the source images.
+`convert_image.py` / `convert_image.ipynb` convert `.dng` to 16-bit TIFF with
+`rawpy` + `tifffile`; `extract_raw_subifd.m` is the MATLAB equivalent.
+The pipeline consumes the `green_proxy_linear.npz` + metadata sidecar this
+step produces.
 
 ### `02_Image_Quality_Assessment/`
-
-Focus and resolution analysis tools.
-
-- `focus_pipeline.ipynb`: focus detection pipeline for capillary phantom image
-  stacks. It creates inpainted bead-free frames, computes multiple focus
-  metrics, combines them into a consensus score, and ranks in-focus images.
-- `read_mtf.ipynb`: notebook for reading and reviewing MTF-related results.
-- `MTF_Analysis.m`: MATLAB slanted-edge MTF analysis script.
-- `simple_MTF_Analysis.m`: folder-based TIFF MTF workflow using the same
-  slanted-edge method.
-
-Outputs from focus analysis are commonly saved in `focus_pipeline_out/`
-folders inside the relevant image acquisition directories.
-
-### `03_Optical_Density_Calculation/`
-
-Notebooks and MATLAB scripts for computing capillary intensity, background
-intensity, and optical density.
-
-- `full_pipeline.ipynb`: end-to-end Python workflow for capillary/background
-  intensity extraction and optical-density calculation.
-- `OD_fixed_BG.ipynb`: optical density pipeline using a separately acquired
-  reference background image.
-- `capillary_crop.ipynb`: capillary cropping and profile extraction workflow.
-- `intensity_profile/`: CSV outputs containing capillary and background
-  intensity profiles and mean profiles.
-- `MATLAB_code/`: MATLAB scripts for single-capillary, multiple-capillary, and
-  background/flow calculations.
-
-Representative outputs include intensity profiles, mean capillary intensity
-`I`, mean background intensity `I0`, and optical-density-related values.
+`focus_pipeline.ipynb` ranks focus-sweep stacks. `MTF_Analysis.m` and
+`simple_MTF_Analysis.m` are slanted-edge MTF scripts; `read_mtf.ipynb` reviews
+the results.
 
 ### `04_Extinction_coefficient/`
-
-Spectral and hemoglobin extinction-coefficient utilities.
-
-- `compute_led_power_density.py`: generates a Gaussian LED spectral power
-  density table on a wavelength grid and saves it to Excel, optionally with a
-  CSV copy.
-- `plotHbExtinctionFromMeasuredSpectra.m`: MATLAB script that combines measured
-  illumination spectra with Prahl hemoglobin extinction data to compute
-  effective extinction coefficients for HbO2 and Hb.
-- `prahl_extinction.txt`: hemoglobin extinction coefficient reference data.
-- `Combined_Spectra.xlsx`: measured or combined spectra workbook.
-- `led_574nm.xlsx`: generated or measured 574 nm LED spectrum workbook.
-
-Example LED spectrum generation:
-
-```bash
-python 04_Extinction_coefficient/compute_led_power_density.py --lambda0 574 --fwhm 35 --step 1 --out 04_Extinction_coefficient/led_574nm.xlsx --csv
-```
+`plotHbExtinctionFromMeasuredSpectra.m` combines measured illumination spectra
+with Prahl's haemoglobin data (`prahl_extinction.txt`) to give the LED-weighted
+coefficients the pipeline uses. `compute_led_power_density.py` generates a
+Gaussian LED spectrum. `led_525nm.xlsx` is the current green LED;
+`led_574nm.xlsx` is from the earlier amber configuration.
 
 ### `05_Capillary_Segmentation/`
+`automated_capillary.ipynb` (vesselness, threshold, skeletonize),
+`capillary_straighten.ipynb`, `velocity_ST_diagram.ipynb`, plus
+`flowmap_utils.py` and `kymograph_utils.py`.
 
-Capillary detection, straightening, kymograph, and velocity-analysis tools.
+### `BackgroundSubtract.py`
+ImageJ/Fiji Jython macro: 32-bit grayscale, Gaussian background estimate,
+divide, display.
 
-- `automated_capillary.ipynb`: automated capillary segmentation workflow using
-  vesselness filtering, thresholding, skeletonization, and centerline handling.
-- `capillary_straighten.ipynb`: straightens capillaries along their centerline
-  for profile and downstream analysis.
-- `velocity_ST_diagram.ipynb`: space-time diagram and velocity analysis.
-- `lowpassfilter.ipynb`: stabilization/filtering workflow.
-- `flowmap_utils.py`: helper functions for centerline sorting, skeleton pruning,
-  vessel wall extraction, flow direction propagation, and geometric transforms.
-- `kymograph_utils.py`: helper functions for loading frame sequences,
-  compensating kymographs, Radon-transform velocity estimation, and
-  interpolation.
-- `crop_coords.json`: saved crop coordinates.
-- `capillary_mask.tif`, `cropped_capillary.tif`, `cropped_image.png`,
-  `cropped_image_debug.png`: example/intermediate segmentation outputs.
-
-### `06_Remote_Phone_Control/`
-
-Android Debug Bridge scripts for controlling Samsung Expert RAW during image
-acquisition.
-
-- `burst_raw.sh`: launches Expert RAW and captures a burst of images using the
-  camera key event.
-- `control_tap.py`: sweeps focus, shutter, ISO, and white balance by tapping
-  calibrated UI locations, with MediaStore polling to wait for captures.
-- `control_drag.py`: sweeps controls by relative drag/swipe steps from
-  calibrated slider positions.
-
-Example burst capture:
+## Dependencies
 
 ```bash
-bash 06_Remote_Phone_Control/burst_raw.sh 5 2
+pip install rawpy tifffile numpy pandas matplotlib scipy scikit-image \
+            opencv-python imageio networkx openpyxl imagecodecs Pillow
 ```
 
-This captures 5 shots with a 2 second delay, assuming the phone is connected
-and `adb` can see the device.
+`opencv-python`, not `-headless` — the ROI pickers need the GUI build.
+`imagecodecs` is required to read JPEG-XL-compressed DNGs.
 
-## Top-Level Utilities
-
-- `BackgroundSubtract.py`: ImageJ/Jython macro-style script that converts the
-  active image to 32-bit grayscale, applies a Gaussian blur background estimate,
-  divides the original image by the blurred background, and displays a
-  background-subtracted TIFF result.
-- `convert_to_ipynb.py`: converts percent-format Python notebooks into `.ipynb`
-  files. The current target is `optical_density_pipeline.py` to
-  `optical_density_pipeline.ipynb` if that source file is present.
-
-## Suggested Workflow
-
-1. Acquire smartphone images using Expert RAW manually or with scripts in
-   `06_Remote_Phone_Control/`.
-2. Store raw image sets under `00_Images/`, organized by magnification, date,
-   subject/sample, or acquisition setting.
-3. Convert `.dng` files to `.tif` using `01_Image_Conversion/convert_image.py`
-   or the MATLAB SubIFD extraction helper.
-4. Use `02_Image_Quality_Assessment/focus_pipeline.ipynb` to rank focus-sweep
-   image stacks and identify the best frames.
-5. Use `03_Optical_Density_Calculation/` notebooks to crop capillaries,
-   extract intensity profiles, estimate background intensity, and compute
-   optical density.
-6. Use `04_Extinction_coefficient/` scripts to generate LED spectra and compute
-   effective hemoglobin extinction coefficients when needed.
-7. Use `05_Capillary_Segmentation/` notebooks and utilities for vessel
-   segmentation, centerline extraction, capillary straightening, kymographs, and
-   velocity analysis.
-
-## Python Dependencies
-
-The Python scripts and notebooks use a mix of scientific imaging packages. A
-typical environment should include:
-
-```bash
-pip install rawpy tifffile numpy pandas matplotlib scipy scikit-image opencv-python imageio plantcv networkx openpyxl
-```
-
-Some notebooks may require additional packages depending on the exact cells
-being run. MATLAB is needed for `.m` scripts, and ImageJ/Fiji is needed for
-`BackgroundSubtract.py`.
-
-## External Tools
-
-- `adb`: required for the remote phone-control scripts in
-  `06_Remote_Phone_Control/`.
-- Samsung Expert RAW: the phone-control scripts launch
-  `com.samsung.android.app.galaxyraw`.
-- MATLAB with Image Processing Toolbox: required for the MTF, DNG SubIFD, and
-  extinction-coefficient MATLAB scripts.
-- ImageJ/Fiji: required for the top-level background subtraction script.
+MATLAB with the Image Processing Toolbox is needed for the `.m` scripts;
+ImageJ/Fiji for `BackgroundSubtract.py`.
 
 ## Notes
 
-- Large raw image files are kept inside the repository under `00_Images/`.
-- Generated TIFFs, focus-ranking outputs, segmentation masks, crop images, and
-  intensity CSVs are also present and can be regenerated from the corresponding
-  notebooks/scripts.
-- Several scripts contain acquisition-specific paths or calibrated screen
-  coordinates. Check paths and coordinates before running them on a new image
-  set or phone display.
+- Several scripts contain acquisition-specific paths. Check them before running
+  on a new image set.
+- `00_Images/` is not in the repository. Notebook paths assume it sits at the
+  location shown in the layout above.
+- Notebooks are committed with outputs. Consider `nbstripout` before adding
+  more — `demo_mac.ipynb` alone is ~2.7 MB of stored output.
